@@ -1,0 +1,193 @@
+services:
+  mosquitto:
+    image: eclipse-mosquitto:2.0
+    container_name: sih-mosquitto
+    restart: unless-stopped
+    ports:
+      - "${MQTT_PORT:-1883}:1883"
+      - "1884:1883"
+    volumes:
+      - ./mosquitto/config/mosquitto.conf:/mosquitto/config/mosquitto.conf
+      - mosquitto_data:/mosquitto/data
+      - mosquitto_log:/mosquitto/log
+    deploy:
+      resources:
+        limits:
+          memory: 64M
+        reservations:
+          memory: 16M
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+    networks:
+      - sih-network
+
+  postgres:
+    image: postgres:16-alpine
+    container_name: sih-postgres
+    restart: unless-stopped
+    command: >
+      postgres
+      -c shared_buffers=64MB
+      -c work_mem=4MB
+      -c maintenance_work_mem=16MB
+      -c temp_buffers=4MB
+      -c max_connections=40
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-sih_user}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-sih_password}
+      POSTGRES_DB: ${POSTGRES_DB:-sih_subsidence_db}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "pg_isready -U ${POSTGRES_USER:-sih_user} -d ${POSTGRES_DB:-sih_subsidence_db}",
+        ]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+        reservations:
+          memory: 64M
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+    networks:
+      - sih-network
+
+  ml-server:
+    build:
+      context: ./ML-Server
+      dockerfile: Dockerfile
+    container_name: sih-ml-server
+    restart: unless-stopped
+    ports:
+      - "${ML_PORT:-8000}:8000"
+    environment:
+      - ML_MODEL_CHECKPOINT=${ML_MODEL_CHECKPOINT:-baseline_latest.pt}
+      - PYTHONUNBUFFERED=1
+    volumes:
+      - ./ML-Server/inference-service/model_registry:/app/inference-service/model_registry
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "curl -f http://localhost:8000/health || exit 1",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+    deploy:
+      resources:
+        limits:
+          memory: 1G
+        reservations:
+          memory: 256M
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+    networks:
+      - sih-network
+
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: sih-backend
+    restart: unless-stopped
+    ports:
+      - "${BACKEND_PORT:-3000}:3000"
+    environment:
+      - PORT=3000
+      - NODE_ENV=production
+      - NODE_OPTIONS=--max-old-space-size=128
+      - MQTT_BROKER_URL=mqtt://mosquitto:1883
+      - MQTT_PORT=1883
+      - DATABASE_HOST=postgres
+      - DATABASE_PORT=5432
+      - DATABASE_USER=${POSTGRES_USER:-sih_user}
+      - DATABASE_PASSWORD=${POSTGRES_PASSWORD:-sih_password}
+      - DATABASE_NAME=${POSTGRES_DB:-sih_subsidence_db}
+      - ML_INFERENCE_URL=${ML_INFERENCE_URL:-http://ml-server:8000/predict}
+      - ML_LOG_STORE_PATH=/app/data/predictions.db
+    volumes:
+      - ./backend/data:/app/data
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    depends_on:
+      mosquitto:
+        condition: service_started
+      postgres:
+        condition: service_healthy
+      ml-server:
+        condition: service_started
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+        reservations:
+          memory: 64M
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+    networks:
+      - sih-network
+
+  dashboard:
+    build:
+      context: ./dashboard
+      dockerfile: Dockerfile
+      args:
+        - NEXT_PUBLIC_BACKEND_URL=http://localhost:${BACKEND_PORT:-3000}
+        - NEXT_PUBLIC_WS_URL=ws://localhost:${BACKEND_PORT:-3000}
+    container_name: sih-dashboard
+    restart: unless-stopped
+    ports:
+      - "${DASHBOARD_PORT:-3001}:3001"
+    environment:
+      - PORT=3001
+      - NODE_ENV=production
+      - NODE_OPTIONS=--max-old-space-size=128
+      - NEXT_TELEMETRY_DISABLED=1
+      - NEXT_PUBLIC_BACKEND_URL=http://localhost:${BACKEND_PORT:-3000}
+      - NEXT_PUBLIC_WS_URL=ws://localhost:${BACKEND_PORT:-3000}
+    depends_on:
+      - backend
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+        reservations:
+          memory: 64M
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+    networks:
+      - sih-network
+
+volumes:
+  mosquitto_data:
+  mosquitto_log:
+  postgres_data:
+
+networks:
+  sih-network:
+    driver: bridge

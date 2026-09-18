@@ -23,9 +23,11 @@ import {
   Radio,
 } from 'lucide-react';
 import { Badge } from '../common/Badge';
-import { SENSOR_CONFIGS } from '@/lib/constants';
+import { SENSOR_CONFIGS, isExcludedMonitoringSensor, SENSOR_DISPLAY_ORDER } from '@/lib/constants';
 import { getSensorSeverity } from '@/lib/utils';
 import { ShadowMlPrediction } from '@/types/ml';
+import type { EdgeAlertLevel, EdgeNodeActuatorState } from '@/types/edgeAlert';
+import { SosButtonGroup } from '../alerts/SosButtonGroup';
 
 interface ZoneContainerProps {
   zoneId: string;
@@ -33,6 +35,8 @@ interface ZoneContainerProps {
   readings: Record<string, Record<string, ValidatedSensorReading>>;
   statuses: Record<string, NodeStatusState>;
   mlPredictions?: Record<string, ShadowMlPrediction>;
+  edgeActuatorStates?: Record<string, EdgeNodeActuatorState>;
+  onDispatchEdgeAlert?: (params: { nodeId: string; zoneId: string; level: EdgeAlertLevel }) => void;
 }
 
 const SENSOR_ICONS: Record<string, React.ComponentType<{ className?: string }>> = {
@@ -50,6 +54,8 @@ export function ZoneContainer({
   readings,
   statuses,
   mlPredictions,
+  edgeActuatorStates,
+  onDispatchEdgeAlert,
 }: ZoneContainerProps) {
   const [isOpen, setIsOpen] = useState(true);
 
@@ -130,9 +136,11 @@ export function ZoneContainer({
       'tilt',
       'vibration',
       'displacement',
-      'gas',
-      'water',
       'crack',
+      'gas_ppm',
+      'water_level_cm',
+      'temperature',
+      'humidity',
     ];
 
     // Collect any extra custom sensors reported by nodes
@@ -140,7 +148,11 @@ export function ZoneContainer({
     nodeIds.forEach(nodeId => {
       const nodeSensors = readings[nodeId];
       if (nodeSensors) {
-        Object.keys(nodeSensors).forEach(st => allSensorTypes.add(st));
+        Object.keys(nodeSensors).forEach(st => {
+          if (!isExcludedMonitoringSensor(st)) {
+            allSensorTypes.add(st);
+          }
+        });
       }
     });
 
@@ -179,7 +191,7 @@ export function ZoneContainer({
       const min = Math.min(...values);
       const max = Math.max(...values);
 
-      if (sensorType === 'crack') {
+      if (sensorType === 'crack' && max <= 1) {
         const rupturedCount = values.filter(v => v >= 1).length;
         const isRuptured = rupturedCount > 0;
         return {
@@ -199,9 +211,19 @@ export function ZoneContainer({
       }
 
       const severity = getSensorSeverity(sensorType, avg);
-      const maxThresh =
-        meta?.criticalThreshold || (meta?.warningThreshold ? meta.warningThreshold * 1.5 : 100);
-      const thresholdRatio = Math.min(1, Math.max(0, avg / (maxThresh || 1)));
+      let thresholdRatio = 0;
+      if (sensorType === 'displacement' || sensorType === 'distance') {
+        thresholdRatio = Math.max(0, Math.min(1, (30 - avg) / 20));
+      } else if (sensorType === 'gas' || sensorType === 'gas_ppm') {
+        thresholdRatio = avg <= 600 ? Math.max(0, Math.min(1, (600 - avg) / 400)) : 0;
+      } else if (sensorType === 'tilt' || sensorType === 'tilt_x_deg' || sensorType === 'tilt_y_deg') {
+        const maxThresh = meta?.criticalThreshold || 3.5;
+        thresholdRatio = Math.min(1, Math.max(0, Math.abs(avg) / (maxThresh || 1)));
+      } else {
+        const maxThresh =
+          meta?.criticalThreshold || (meta?.warningThreshold ? meta.warningThreshold * 1.5 : 100);
+        thresholdRatio = Math.min(1, Math.max(0, avg / (maxThresh || 1)));
+      }
 
       return {
         sensorType,
@@ -217,7 +239,21 @@ export function ZoneContainer({
         isRuptured: false,
         rupturedCount: 0,
       };
-    });
+    })
+      .filter(s => !isExcludedMonitoringSensor(s.sensorType))
+      .filter((s, _, arr) => {
+        if (s.sensorType === 'temperature_c' && arr.some(x => x.sensorType === 'temperature')) return false;
+        if (s.sensorType === 'humidity_pct' && arr.some(x => x.sensorType === 'humidity')) return false;
+        if (s.sensorType === 'crack_displacement_mm' && arr.some(x => x.sensorType === 'crack')) return false;
+        return true;
+      })
+      .sort((a, b) => {
+        const orderA = SENSOR_DISPLAY_ORDER.indexOf(a.sensorType);
+        const orderB = SENSOR_DISPLAY_ORDER.indexOf(b.sensorType);
+        const idxA = orderA === -1 ? 999 : orderA;
+        const idxB = orderB === -1 ? 999 : orderB;
+        return idxA - idxB;
+      });
   }, [nodeIds, readings, totalNodes]);
 
   // Overall Zone Threat Assessment based on computed averages
@@ -528,6 +564,8 @@ export function ZoneContainer({
                         status={statuses[nodeId]}
                         sensors={readings[nodeId] || {}}
                         mlPrediction={mlPredictions?.[nodeId]}
+                        actuatorState={edgeActuatorStates?.[nodeId]}
+                        onDispatchEdgeAlert={onDispatchEdgeAlert}
                       />
                     </div>
                   ))}

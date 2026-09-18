@@ -71,15 +71,8 @@ def load_model(checkpoint_path: str):
 
 
 def run_inference(model, X_test, norm_stats):
-    """Run inference on test data, normalizing only if raw/unnormalized."""
-    # Check if X_test is already normalized (test_split.npz is pre-normalized by train.py)
-    is_already_normalized = abs(X_test.mean()) < 0.5 and abs(X_test.std() - 1.0) < 0.5
-    if not is_already_normalized:
-        mean = np.array(norm_stats["mean"], dtype=np.float32)
-        std = np.array(norm_stats["std"], dtype=np.float32)
-        X_norm = (X_test - mean) / std
-    else:
-        X_norm = X_test
+    """Run inference on test data (X_test in test_split.npz is pre-normalized by train.py)."""
+    X_norm = X_test
 
     model.eval()
     all_logits = []

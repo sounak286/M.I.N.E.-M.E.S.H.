@@ -540,6 +540,12 @@ def train_model(
     print(f"  Saved Checkpoint: {ckpt_path}")
     print(f"  Saved Latest Link: {latest_path}")
 
+    # Save normalization stats json
+    stats_path = os.path.join(MODEL_REGISTRY, "normalization_stats.json")
+    with open(stats_path, "w") as f:
+        json.dump(norm_stats, f, indent=2)
+    print(f"  Saved Normalization Stats: {stats_path}")
+
     # Save test data for evaluate.py
     test_data_path = os.path.join(MODEL_REGISTRY, "test_split.npz")
     np.savez(test_data_path,

@@ -146,10 +146,15 @@ export class AlertsService {
       if (rule.sensorType.toLowerCase() !== sensorType.toLowerCase()) continue;
 
       let triggered = false;
-      if (rule.operator === '>=' && value >= rule.threshold) triggered = true;
-      else if (rule.operator === '>' && value > rule.threshold) triggered = true;
-      else if (rule.operator === '==' && value === rule.threshold) triggered = true;
-
+      const compareVal = (rule.sensorType === 'tilt' || rule.sensorType === 'tilt_x_deg' || rule.sensorType === 'tilt_y_deg')
+        ? Math.abs(value)
+        : value;
+      if (rule.operator === '>=' && compareVal >= rule.threshold) triggered = true;
+      else if (rule.operator === '>' && compareVal > rule.threshold) triggered = true;
+      else if (rule.operator === '<=' && compareVal <= rule.threshold) triggered = true;
+      else if (rule.operator === '<' && compareVal < rule.threshold) triggered = true;
+      else if (rule.operator === '==' && compareVal === rule.threshold) triggered = true;
+ ``
       if (triggered) {
         const cooldownKey = `${nodeId}:${rule.id}`;
         const now = Date.now();

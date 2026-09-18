@@ -16,6 +16,8 @@ import { NodeStatusState } from '@/types/node';
 import { SystemLatencyMetrics, SnapshotPayload } from '@/types/socket';
 import { SubsidenceAlert } from '@/types/alert';
 import { ShadowMlPrediction } from '@/types/ml';
+import type { EdgeAlertLevel, EdgeNodeActuatorState, EdgeAlertCommand } from '@/types/edgeAlert';
+import { EDGE_ALERT_CONFIGS } from '@/types/edgeAlert';
 import { getSensorSeverity } from '@/lib/utils';
 import { SENSOR_CONFIGS } from '@/lib/constants';
 import {
@@ -71,6 +73,8 @@ interface RealtimeContextValue {
   testVoiceAlert: () => void;
   isSpeaking: boolean;
   lastSpokenMessage: string | null;
+  edgeActuatorStates: Record<string, EdgeNodeActuatorState>;
+  dispatchEdgeAlert: (params: { nodeId: string; zoneId: string; level: EdgeAlertLevel; message?: string }) => void;
 }
 
 const RealtimeContext = createContext<RealtimeContextValue | null>(null);
@@ -128,6 +132,9 @@ export function RealtimeProvider({ children }: { children: React.ReactNode }) {
   // State for simulated interactive mesh mode & auto purge
   const [isSimulationActive, setIsSimulationActive] = useState(false);
   const [autoPurgeStale, setAutoPurgeStale] = useState(true);
+
+  // Edge Alert Actuator States (physical LED / buzzer state per node)
+  const [edgeActuatorStates, setEdgeActuatorStates] = useState<Record<string, EdgeNodeActuatorState>>({});
 
   // Voice Alert & Speech Synthesis state
   const [voiceAlertsEnabled, setVoiceAlertsEnabled] = useState<boolean>(() => {
@@ -559,6 +566,13 @@ export function RealtimeProvider({ children }: { children: React.ReactNode }) {
           }
         }
 
+        const tiltX = Number((tilt * 0.68 + Math.sin(nowMs / 3000 + nIdx) * 0.15).toFixed(2));
+        const tiltY = Number((tilt * 0.55 + Math.cos(nowMs / 3400 + nIdx) * 0.12).toFixed(2));
+        // Roof distance in cm: starts around 180cm, decreases as displacement converges
+        const distCm = Math.max(5.0, Number((180.0 - disp * 11.5).toFixed(1)));
+        const tempC = Number((24.2 + (nodeId === 'NODE_02' ? 6.5 : 0) + (ramp > 0.6 ? 7.8 : 1.2) + Math.sin(nowMs / 9000) * 0.8).toFixed(1));
+        const humPct = Math.min(98.0, Math.max(25.0, Number((58.0 + water * 18.0 + Math.cos(nowMs / 8000) * 3.5).toFixed(1))));
+
         newSimReadings.push(
           {
             nodeId,
@@ -566,6 +580,24 @@ export function RealtimeProvider({ children }: { children: React.ReactNode }) {
             sensorType: 'tilt',
             value: Math.max(0.05, Number(tilt.toFixed(2))),
             unit: 'degrees',
+            timestamp: now,
+            sequenceNumber: batchRound * 10 + nIdx,
+          },
+          {
+            nodeId,
+            zoneId,
+            sensorType: 'tilt_x_deg',
+            value: tiltX,
+            unit: 'deg',
+            timestamp: now,
+            sequenceNumber: batchRound * 10 + nIdx,
+          },
+          {
+            nodeId,
+            zoneId,
+            sensorType: 'tilt_y_deg',
+            value: tiltY,
+            unit: 'deg',
             timestamp: now,
             sequenceNumber: batchRound * 10 + nIdx,
           },
@@ -590,6 +622,15 @@ export function RealtimeProvider({ children }: { children: React.ReactNode }) {
           {
             nodeId,
             zoneId,
+            sensorType: 'distance',
+            value: distCm,
+            unit: 'cm',
+            timestamp: now,
+            sequenceNumber: batchRound * 10 + nIdx,
+          },
+          {
+            nodeId,
+            zoneId,
             sensorType: 'crack',
             value: crack,
             unit: '',
@@ -608,9 +649,45 @@ export function RealtimeProvider({ children }: { children: React.ReactNode }) {
           {
             nodeId,
             zoneId,
+            sensorType: 'gas_ppm',
+            value: Math.max(2, Math.round(gas)),
+            unit: 'ppm',
+            timestamp: now,
+            sequenceNumber: batchRound * 10 + nIdx,
+          },
+          {
+            nodeId,
+            zoneId,
             sensorType: 'water',
             value: Math.max(0.1, Number(water.toFixed(2))),
             unit: 'm',
+            timestamp: now,
+            sequenceNumber: batchRound * 10 + nIdx,
+          },
+          {
+            nodeId,
+            zoneId,
+            sensorType: 'water_level_cm',
+            value: Math.max(1, Math.round(water * 100)),
+            unit: 'cm',
+            timestamp: now,
+            sequenceNumber: batchRound * 10 + nIdx,
+          },
+          {
+            nodeId,
+            zoneId,
+            sensorType: 'temperature',
+            value: tempC,
+            unit: '°C',
+            timestamp: now,
+            sequenceNumber: batchRound * 10 + nIdx,
+          },
+          {
+            nodeId,
+            zoneId,
+            sensorType: 'humidity',
+            value: humPct,
+            unit: '%',
             timestamp: now,
             sequenceNumber: batchRound * 10 + nIdx,
           }
@@ -1229,6 +1306,23 @@ export function RealtimeProvider({ children }: { children: React.ReactNode }) {
     socket.on('readings', handleReadings);
     socket.on('nodeStatuses', handleNodeStatuses);
 
+    // Edge Alert Socket Listeners
+    socket.on('edge_alert:update', (data: { command: EdgeAlertCommand; state: EdgeNodeActuatorState }) => {
+      if (data.state?.nodeId) {
+        setEdgeActuatorStates(prev => ({ ...prev, [data.state.nodeId]: data.state }));
+      }
+    });
+    socket.on('edge_alert:ack', (state: EdgeNodeActuatorState) => {
+      if (state?.nodeId) {
+        setEdgeActuatorStates(prev => ({ ...prev, [state.nodeId]: state }));
+      }
+    });
+    socket.on('edge_alert:state_batch', (states: Record<string, EdgeNodeActuatorState>) => {
+      if (states && typeof states === 'object') {
+        setEdgeActuatorStates(prev => ({ ...prev, ...states }));
+      }
+    });
+
     // Initial check if already connected
     if (socket.connected) {
       handleConnect();
@@ -1257,6 +1351,10 @@ export function RealtimeProvider({ children }: { children: React.ReactNode }) {
       socket.off('snapshot', handleSnapshot);
       socket.off('readings', handleReadings);
       socket.off('nodeStatuses', handleNodeStatuses);
+
+      socket.off('edge_alert:update');
+      socket.off('edge_alert:ack');
+      socket.off('edge_alert:state_batch');
     };
   }, [socket, dispatchMlPrediction]);
 
@@ -1390,6 +1488,77 @@ export function RealtimeProvider({ children }: { children: React.ReactNode }) {
     }
   }, [socket, nodeStatuses]);
 
+  // Edge Alert Dispatch via Socket.IO (with local simulation fallback)
+  const dispatchEdgeAlert = useCallback(
+    (params: { nodeId: string; zoneId: string; level: EdgeAlertLevel; message?: string }) => {
+      const config = EDGE_ALERT_CONFIGS[params.level];
+      const commandId = `sos-${params.nodeId}-${Date.now()}`;
+      const now = new Date().toISOString();
+
+      // Local state update (optimistic)
+      const state: EdgeNodeActuatorState = {
+        nodeId: params.nodeId,
+        zoneId: params.zoneId,
+        level: params.level,
+        color: config.color,
+        buzzer: config.buzzer,
+        buzzerMode: config.buzzerMode,
+        ledPattern: config.ledPattern,
+        lastCommandId: commandId,
+        lastUpdatedAt: now,
+        acknowledged: false,
+      };
+      setEdgeActuatorStates(prev => ({ ...prev, [params.nodeId]: state }));
+
+      // Voice announcement
+      const cleanNode = params.nodeId.replace(/_/g, ' ');
+      const levelLabels: Record<EdgeAlertLevel, string> = {
+        CRITICAL: 'Critical emergency',
+        WARNING: 'Warning alert',
+        ADVISORY: 'Advisory notification',
+        NORMAL: 'All clear status',
+      };
+      const speechText = `${levelLabels[params.level]} dispatched to ${cleanNode}. ${config.buzzer ? `Buzzer ${config.buzzerMode} activated.` : 'Buzzer off.'} LED ${config.color} ${config.ledPattern}.`;
+      voiceAlertService.speak(speechText, {
+        type: params.level === 'CRITICAL' ? 'critical' : 'warning',
+        force: true,
+        onStart: () => {
+          setIsSpeaking(true);
+          setLastSpokenMessage(speechText);
+        },
+        onEnd: () => {
+          setIsSpeaking(false);
+        },
+      });
+
+      // Send via Socket.IO to backend (which publishes MQTT downlink)
+      if (socket?.connected) {
+        socket.emit('dispatch_edge_alert', {
+          nodeId: params.nodeId,
+          zoneId: params.zoneId,
+          level: params.level,
+          message: params.message || `${params.level} SOS dispatched by operator`,
+          targetType: 'node',
+        });
+      }
+
+      // Simulate ACK after 1.5s in simulation mode
+      if (isSimulationActive || !socket?.connected) {
+        setTimeout(() => {
+          setEdgeActuatorStates(prev => {
+            const existing = prev[params.nodeId];
+            if (!existing || existing.lastCommandId !== commandId) return prev;
+            return {
+              ...prev,
+              [params.nodeId]: { ...existing, acknowledged: true, lastUpdatedAt: new Date().toISOString() },
+            };
+          });
+        }, 1500);
+      }
+    },
+    [socket, isSimulationActive],
+  );
+
   const toggleSimulation = useCallback(() => {
     setIsSimulationActive(prev => {
       const next = !prev;
@@ -1431,6 +1600,8 @@ export function RealtimeProvider({ children }: { children: React.ReactNode }) {
       testVoiceAlert,
       isSpeaking,
       lastSpokenMessage,
+      edgeActuatorStates,
+      dispatchEdgeAlert,
     }),
     [
       socket,
@@ -1457,6 +1628,8 @@ export function RealtimeProvider({ children }: { children: React.ReactNode }) {
       testVoiceAlert,
       isSpeaking,
       lastSpokenMessage,
+      edgeActuatorStates,
+      dispatchEdgeAlert,
     ]
   );
 

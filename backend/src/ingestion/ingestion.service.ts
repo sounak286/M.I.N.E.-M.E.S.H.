@@ -36,6 +36,7 @@ const LORA_TOPIC = 'sensors/lora/#';
 const GATEWAY_TOPIC = 'gateway/#';
 const SENSORS_GATEWAY_TOPIC = 'sensors/gateway/#';
 const MINE_GATEWAY_TOPIC = 'mine/gateway/#';
+const ALERT_ACK_TOPIC = 'mine/+/+/alert/ack';
 
 /** Valid sensor types per Design&Architecture.md §3 and ML_WORKFLOW.md §2 */
 const VALID_SENSOR_TYPES = new Set([
@@ -50,9 +51,12 @@ const VALID_SENSOR_TYPES = new Set([
   'vibration_freq',
   'vibration_freq_hz',
   'displacement',
+  'distance',
   'crack',
   'crack_displacement',
   'crack_displacement_mm',
+  'potentiometer',
+  'pot',
   'gas',
   'gas_ppm',
   'water',
@@ -170,13 +174,14 @@ export class IngestionService implements OnModuleInit, OnModuleDestroy {
       this.isBrokerConnected = true;
       this.emitGatewayStatus();
 
-      // Subscribe to mine telemetry, hardware LoRa topics, gateway topics, and broker $SYS telemetry
+      // Subscribe to mine telemetry, hardware LoRa topics, gateway topics, alert ACKs, and broker $SYS telemetry
       const topics = [
         SUBSCRIBE_TOPIC,
         LORA_TOPIC,
         GATEWAY_TOPIC,
         SENSORS_GATEWAY_TOPIC,
         MINE_GATEWAY_TOPIC,
+        ALERT_ACK_TOPIC,
         '$SYS/broker/clients/#',
         '$SYS/broker/clients/connected',
       ];
@@ -245,10 +250,43 @@ export class IngestionService implements OnModuleInit, OnModuleDestroy {
   }
 
   /**
+   * Public MQTT publish method for downlink commands (e.g., Edge Alert dispatch).
+   * Used by EdgeAlertService to send alert commands to ESP32 Gateway / Edge Nodes.
+   */
+  publishMqtt(topic: string, payload: string | Buffer, qos: 0 | 1 | 2 = 1): Promise<void> {
+    return new Promise((resolve, reject) => {
+      if (!this.client || !this.isBrokerConnected) {
+        this.logger.warn(`[ingestion] Cannot publish to "${topic}" — MQTT client not connected`);
+        return reject(new Error('MQTT client not connected'));
+      }
+      this.client.publish(topic, payload, { qos }, (err) => {
+        if (err) {
+          this.logger.error(`[ingestion] MQTT publish error on "${topic}": ${err.message}`);
+          return reject(err);
+        }
+        this.logger.log(`[ingestion] Published downlink to "${topic}" (QoS ${qos})`);
+        resolve();
+      });
+    });
+  }
+
+  /**
    * MQTT message handler
    */
   private handleMessage(topic: string, payload: Buffer): void {
-    // --- 0. Handle Mosquitto Broker Internal Client Telemetry ($SYS/broker/clients/...) ---
+    // --- 0a. Handle Edge Alert ACK from Gateway/Node ---
+    if (topic.endsWith('/alert/ack')) {
+      try {
+        const ackPayload = JSON.parse(payload.toString().trim());
+        this.logger.log(`[ingestion] Edge Alert ACK received: node=${ackPayload.nodeId || 'unknown'} commandId=${ackPayload.commandId || 'unknown'}`);
+        this.eventEmitter.emit('edge.alert.acknowledged', ackPayload);
+      } catch {
+        this.logger.warn(`[ingestion] Invalid alert ACK payload on "${topic}"`);
+      }
+      return;
+    }
+
+    // --- 0b. Handle Mosquitto Broker Internal Client Telemetry ($SYS/broker/clients/...) ---
     if (topic.startsWith('$SYS/broker/clients')) {
       if (topic === '$SYS/broker/clients/connected' || topic.endsWith('/connected')) {
         const count = parseInt(payload.toString().trim(), 10);
@@ -690,7 +728,9 @@ export class IngestionService implements OnModuleInit, OnModuleDestroy {
       { sensorType: 'tilt', value: isNaN(tilt) ? 0 : tilt, unit: 'degrees' },
       { sensorType: 'vibration', value: isNaN(vibration) ? 0 : vibration, unit: 'g' },
       { sensorType: 'displacement', value: distVal, unit: 'cm' },
+      { sensorType: 'distance', value: distVal, unit: 'cm' },
       { sensorType: 'crack', value: data.pot_raw, unit: 'raw' },
+      { sensorType: 'potentiometer', value: data.pot_raw, unit: 'raw' },
       { sensorType: 'gas', value: data.mq6_raw, unit: 'raw' },
       { sensorType: 'water', value: data.water_raw, unit: 'raw' },
       // 9-channel ML feature representations (ML_WORKFLOW.md §2)
@@ -736,6 +776,24 @@ export class IngestionService implements OnModuleInit, OnModuleDestroy {
     sensorReadings.push({ sensorType: 'temperature_c', value: tempVal, unit: '°C' });
     sensorReadings.push({ sensorType: 'humidity', value: humVal, unit: '%' });
     sensorReadings.push({ sensorType: 'humidity_pct', value: humVal, unit: '%' });
+
+    // Hardware node threshold state evaluation matching evaluateSensorStates()
+    const tempRisk = tempVal >= 45.0 ? 'DANGER' : tempVal >= 35.0 ? 'WARNING' : 'SAFE';
+    const humRisk = humVal >= 85.0 ? 'DANGER' : humVal >= 70.0 ? 'WARNING' : 'SAFE';
+    const mq6Risk = (data.mq6_raw > 0 && data.mq6_raw <= 200) || data.mq6_raw >= 1000 ? 'DANGER' : (data.mq6_raw <= 400 || data.mq6_raw >= 600) ? 'WARNING' : 'SAFE';
+    const waterRisk = data.water_raw >= 1500 ? 'DANGER' : data.water_raw >= 900 ? 'WARNING' : 'SAFE';
+    const potRisk = data.pot_raw >= 1500 ? 'DANGER' : data.pot_raw >= 1000 ? 'WARNING' : 'SAFE';
+    const distRisk = (distVal > 0 && distVal <= 10.0) ? 'DANGER' : (distVal > 0 && distVal <= 15.0) ? 'WARNING' : 'SAFE';
+    const tiltRisk = Math.abs(tilt) >= 3.5 ? 'DANGER' : Math.abs(tilt) >= 2.0 ? 'WARNING' : 'SAFE';
+    const globalRisk = (tempRisk === 'DANGER' || humRisk === 'DANGER' || mq6Risk === 'DANGER' || waterRisk === 'DANGER' || potRisk === 'DANGER' || distRisk === 'DANGER' || tiltRisk === 'DANGER')
+      ? 'DANGER'
+      : (tempRisk === 'WARNING' || humRisk === 'WARNING' || mq6Risk === 'WARNING' || waterRisk === 'WARNING' || potRisk === 'WARNING' || distRisk === 'WARNING' || tiltRisk === 'WARNING')
+      ? 'WARNING'
+      : 'SAFE';
+
+    this.logger.log(
+      `[ingestion] Node ${nodeId} State: ${globalRisk} | Temp: ${tempVal}°C [${tempRisk}] | Water: ${data.water_raw} [${waterRisk}] | Pot: ${data.pot_raw} [${potRisk}] | Gas: ${data.mq6_raw} [${mq6Risk}] | Dist: ${distVal}cm [${distRisk}] | Tilt: ${tilt}° [${tiltRisk}]`,
+    );
 
     for (const item of sensorReadings) {
       const validated: ValidatedSensorReading = {

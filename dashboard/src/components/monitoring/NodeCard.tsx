@@ -1,12 +1,15 @@
-import React, { useState } from 'react';
+import React, { useState, useMemo } from 'react';
 import { NodeStatusState } from '@/types/node';
 import { ValidatedSensorReading } from '@/types/sensor';
 import { ShadowMlPrediction } from '@/types/ml';
+import type { EdgeAlertLevel, EdgeNodeActuatorState } from '@/types/edgeAlert';
 import { SensorGauge } from './SensorGauge';
 import { Badge } from '../common/Badge';
 import { Card } from '../common/Card';
 import { MlPredictionInspectorModal } from '../common/MlPredictionInspectorModal';
+import { SosButtonGroup } from '../alerts/SosButtonGroup';
 import { formatRelativeTime } from '@/lib/utils';
+import { isExcludedMonitoringSensor, SENSOR_DISPLAY_ORDER } from '@/lib/constants';
 import { Cpu, AlertTriangle, WifiOff, Clock, Brain, Zap, ExternalLink } from 'lucide-react';
 
 interface NodeCardProps {
@@ -15,6 +18,8 @@ interface NodeCardProps {
   status?: NodeStatusState;
   sensors: Record<string, ValidatedSensorReading>;
   mlPrediction?: ShadowMlPrediction;
+  actuatorState?: EdgeNodeActuatorState;
+  onDispatchEdgeAlert?: (params: { nodeId: string; zoneId: string; level: EdgeAlertLevel }) => void;
 }
 
 export const NodeCard = React.memo(function NodeCard({
@@ -23,6 +28,8 @@ export const NodeCard = React.memo(function NodeCard({
   status,
   sensors,
   mlPrediction,
+  actuatorState,
+  onDispatchEdgeAlert,
 }: NodeCardProps) {
   const [showInspector, setShowInspector] = useState(false);
   const isOnline = status?.status === 'online';
@@ -31,6 +38,26 @@ export const NodeCard = React.memo(function NodeCard({
 
   const statusVariant = isOnline ? 'success' : isStale ? 'warning' : 'danger';
   const statusLabel = isOnline ? 'Online' : isStale ? 'Stale' : 'Offline / LWT';
+
+  // Filter out secondary, raw ADC, and duplicate sensor channels for clean monitoring presentation
+  const visibleSensors = useMemo(() => {
+    return Object.entries(sensors)
+      .filter(([sensorType]) => !isExcludedMonitoringSensor(sensorType))
+      .filter(([sensorType]) => {
+        // Prevent duplicate temp/hum/crack cards if both canonical and suffixed types exist
+        if (sensorType === 'temperature_c' && sensors['temperature']) return false;
+        if (sensorType === 'humidity_pct' && sensors['humidity']) return false;
+        if (sensorType === 'crack_displacement_mm' && sensors['crack']) return false;
+        return true;
+      })
+      .sort(([a], [b]) => {
+        const orderA = SENSOR_DISPLAY_ORDER.indexOf(a);
+        const orderB = SENSOR_DISPLAY_ORDER.indexOf(b);
+        const idxA = orderA === -1 ? 999 : orderA;
+        const idxB = orderB === -1 ? 999 : orderB;
+        return idxA - idxB;
+      });
+  }, [sensors]);
 
   return (
     <Card
@@ -80,14 +107,27 @@ export const NodeCard = React.memo(function NodeCard({
         </div>
       </div>
 
+      {/* Compact SOS Edge Dispatch Buttons */}
+      {onDispatchEdgeAlert && (
+        <div className="pb-3 mb-1 border-b border-[#e5e5e5] dark:border-[#14213d]/80">
+          <SosButtonGroup
+            nodeId={nodeId}
+            zoneId={zoneId}
+            actuatorState={actuatorState}
+            onDispatch={onDispatchEdgeAlert}
+            compact
+          />
+        </div>
+      )}
+
       {/* Sensor Grid */}
       <div
         className={`grid grid-cols-1 sm:grid-cols-2 gap-2.5 transition-opacity ${
           isOnline ? 'opacity-100' : 'opacity-60'
         }`}
       >
-        {Object.keys(sensors).length > 0 ? (
-          Object.entries(sensors).map(([sensorType, reading]) => (
+        {visibleSensors.length > 0 ? (
+          visibleSensors.map(([sensorType, reading]) => (
             <SensorGauge key={sensorType} reading={reading} />
           ))
         ) : !isOnline ? (

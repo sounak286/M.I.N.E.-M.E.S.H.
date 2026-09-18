@@ -6,7 +6,7 @@ export interface AlertRule {
   id: string;
   name: string;
   sensorType: SensorType;
-  operator: '>' | '<' | '==' | '>=';
+  operator: '>' | '<' | '==' | '>=' | '<=';
   threshold: number;
   unit: string;
   severity: AlertSeverity;

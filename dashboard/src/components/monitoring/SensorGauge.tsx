@@ -10,6 +10,9 @@ import {
   Flame,
   Droplets,
   Gauge,
+  Thermometer,
+  CloudRain,
+  Sliders,
 } from 'lucide-react';
 
 interface SensorGaugeProps {
@@ -20,9 +23,18 @@ const ICONS: Record<string, React.ComponentType<{ className?: string }>> = {
   tilt: Compass,
   vibration: Activity,
   displacement: MoveVertical,
+  distance: MoveVertical,
   crack: Zap,
   gas: Flame,
+  gas_ppm: Flame,
   water: Droplets,
+  water_level_cm: Droplets,
+  temperature: Thermometer,
+  temperature_c: Thermometer,
+  humidity: CloudRain,
+  humidity_pct: CloudRain,
+  potentiometer: Sliders,
+  pot: Sliders,
 };
 
 export function SensorGauge({ reading }: SensorGaugeProps) {
@@ -68,12 +80,22 @@ export function SensorGauge({ reading }: SensorGaugeProps) {
       </div>
 
       <div className="flex items-baseline justify-between mt-1">
-        <span className="font-mono text-base font-black tracking-tight text-[#000000] dark:text-white">
-          {formatted}
-        </span>
-        {displayUnit && (
-          <span className="text-[11px] font-semibold text-[#5c677d] dark:text-[#94a3b8] ml-1">
-            {displayUnit}
+        <div className="flex items-baseline gap-1">
+          <span className="font-mono text-base font-black tracking-tight text-[#000000] dark:text-white transition-all duration-300">
+            {formatted}
+          </span>
+          {displayUnit && (
+            <span className="text-[11px] font-semibold text-[#5c677d] dark:text-[#94a3b8]">
+              {displayUnit}
+            </span>
+          )}
+        </div>
+        {reading.rawValue !== undefined && (
+          <span
+            className="text-[9px] font-mono px-1.5 py-0.5 rounded bg-blue-500/10 dark:bg-blue-500/20 text-blue-600 dark:text-blue-400 border border-blue-500/20 font-medium tracking-tight"
+            title={`Moving Average Smoothed (Raw Input: ${reading.rawValue})`}
+          >
+            SMA
           </span>
         )}
       </div>

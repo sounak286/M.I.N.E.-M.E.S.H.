@@ -29,6 +29,8 @@ export interface RawSensorReading {
 export interface ValidatedSensorReading extends RawSensorReading {
   /** ISO 8601 timestamp of when the backend received this message */
   readonly receivedAt?: string;
+  /** Original unconditioned raw sensor reading prior to filtering/smoothing */
+  readonly rawValue?: number;
 }
 
 export interface SensorMetadata {

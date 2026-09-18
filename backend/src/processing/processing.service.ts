@@ -3,6 +3,7 @@ import { OnEvent, EventEmitter2 } from '@nestjs/event-emitter';
 import type { ValidatedSensorReading } from '../ingestion/sensor-reading.interface.js';
 import type { ValidatedNodeStatus, NodeStatusState } from '../ingestion/node-status.interface.js';
 import { MlInferenceService } from '../ml/ml-inference.service.js';
+import { MovingAverageFilterService } from './moving-average-filter.service.js';
 
 @Injectable()
 export class ProcessingService implements OnModuleInit, OnModuleDestroy {
@@ -23,6 +24,7 @@ export class ProcessingService implements OnModuleInit, OnModuleDestroy {
   constructor(
     private readonly eventEmitter: EventEmitter2,
     private readonly mlInference: MlInferenceService,
+    private readonly movingAverageFilter: MovingAverageFilterService,
   ) { }
 
   onModuleInit(): void {
@@ -49,6 +51,7 @@ export class ProcessingService implements OnModuleInit, OnModuleDestroy {
           this.logger.warn(
             `[processing] Node ${nodeId} timed out (no data for ${Math.round((now - lastSeen) / 1000)}s) -> marked offline`,
           );
+          this.movingAverageFilter.resetNode(nodeId);
           this.mlInference.onNodeOffline(nodeId);
           this.eventEmitter.emit('node.status.changed', nodeStatus);
         }
@@ -144,13 +147,22 @@ export class ProcessingService implements OnModuleInit, OnModuleDestroy {
       this.lastSequenceNumber.set(nodeId, sequenceNumber);
     }
 
-    this.logger.log(`[processing] Processed new reading: node=${nodeId} seq=${sequenceNumber}`);
+    if (isReset) {
+      this.movingAverageFilter.resetNode(nodeId);
+    }
+
+    // Apply Moving Average filter to eliminate sensor jitter and round cleanly
+    const smoothedReading = this.movingAverageFilter.smooth(reading);
+
+    this.logger.log(
+      `[processing] Processed reading: node=${nodeId} seq=${sequenceNumber} type=${sensorType} val=${smoothedReading.value}${smoothedReading.unit} (raw=${smoothedReading.rawValue})`,
+    );
 
     // Pass to ML window buffer for shadow inference
-    this.mlInference.handleSensorReading(reading);
+    this.mlInference.handleSensorReading(smoothedReading);
 
-    // Pass further downstream (to storage, realtime, etc.)
-    this.eventEmitter.emit('sensor.reading.deduped', reading);
+    // Pass further downstream (to storage, realtime, alerts, etc.)
+    this.eventEmitter.emit('sensor.reading.deduped', smoothedReading);
   }
 
   @OnEvent('node.status.received')
@@ -170,6 +182,10 @@ export class ProcessingService implements OnModuleInit, OnModuleDestroy {
       nodeStatus.status = status;
       nodeStatus.lastSeenAt = receivedAt;
       nodeStatus.zoneId = zoneId;
+    }
+
+    if (status === 'offline') {
+      this.movingAverageFilter.resetNode(nodeId);
     }
 
     this.logger.log(`[processing] Node status changed: node=${nodeId} status=${status}`);

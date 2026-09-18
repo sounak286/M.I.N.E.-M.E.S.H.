@@ -2,6 +2,7 @@ import type { Metadata } from "next";
 import localFont from "next/font/local";
 import { Geist_Mono } from "next/font/google";
 import "./globals.css";
+import Script from "next/script";
 import { RealtimeProvider } from "@/context/RealtimeContext";
 import { ThemeProvider } from "@/context/ThemeContext";
 import { AppShell } from "@/components/layout/AppShell";
@@ -75,9 +76,9 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "Mine Subsidence Telemetry & Early Warning System | SIH-2026",
+  title: "MINE MESH™ | Autonomous Mine Subsidence Telemetry & Early Warning System",
   description:
-    "Real-time IoT geotechnical sensor telemetry mesh monitoring, sequence gap auditing, and subsidence risk forecasting for mining operations.",
+    "MINE MESH™ (Mine Infrastructure Network & Early Warning Mesh) - Mission-critical IoT geotechnical sensor telemetry mesh monitoring, real-time strata analytics, sequence gap auditing, and subsidence risk forecasting for underground mining operations.",
 };
 
 export default function RootLayout({
@@ -93,7 +94,9 @@ export default function RootLayout({
     >
       <head>
         {/* Anti-FOUC script to synchronize saved theme immediately */}
-        <script
+        <Script
+          id="theme-initializer"
+          strategy="beforeInteractive"
           dangerouslySetInnerHTML={{
             __html: `
               (function() {

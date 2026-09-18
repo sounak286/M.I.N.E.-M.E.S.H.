@@ -20,16 +20,16 @@ export class MlWindowBufferService {
 
   /**
    * Default baseline values used when a channel has not yet transmitted.
-   * Derived from quiet operating conditions in minegaurd_sensor_dataset.csv.
+   * Derived from quiet operating conditions calibrated to the ESP32 node.
    */
   private readonly channelBaselines: Record<string, number> = {
     tilt_x_deg: 0.0,
     tilt_y_deg: 0.0,
     vibration_amplitude_g: 0.025,
     vibration_freq_hz: 5.0,
-    crack_displacement_mm: 3.0,
-    water_level_cm: 1.5,
-    gas_ppm: 100.0,
+    crack_displacement_mm: 280.0,
+    water_level_cm: 236.0,
+    gas_ppm: 650.0,
     temperature_c: 25.0,
     humidity_pct: 65.0,
   };
@@ -49,14 +49,25 @@ export class MlWindowBufferService {
 
     if (s === 'vibration_freq_hz' || s === 'vibration_freq') return 'vibration_freq_hz';
 
-    if (s === 'crack_displacement_mm' || s === 'crack_displacement') return 'crack_displacement_mm';
-    if (s === 'displacement' || s === 'crack') return 'crack_displacement_mm';
+    if (
+      s === 'crack_displacement_mm' ||
+      s === 'crack_displacement' ||
+      s === 'potentiometer' ||
+      s === 'pot' ||
+      s === 'pot_raw' ||
+      s === 'crack'
+    ) {
+      return 'crack_displacement_mm';
+    }
+    if (s === 'displacement' || s === 'distance' || s === 'dist_cm') {
+      return 'crack_displacement_mm';
+    }
 
-    if (s === 'water_level_cm' || s === 'water_level' || s === 'water') return 'water_level_cm';
-    if (s === 'gas_ppm' || s === 'gas') return 'gas_ppm';
+    if (s === 'water_level_cm' || s === 'water_level' || s === 'water' || s === 'water_raw') return 'water_level_cm';
+    if (s === 'gas_ppm' || s === 'gas' || s === 'mq6' || s === 'mq6_raw') return 'gas_ppm';
 
-    if (s === 'temperature_c' || s === 'temperature') return 'temperature_c';
-    if (s === 'humidity_pct' || s === 'humidity') return 'humidity_pct';
+    if (s === 'temperature_c' || s === 'temperature' || s === 'temp') return 'temperature_c';
+    if (s === 'humidity_pct' || s === 'humidity' || s === 'hum') return 'humidity_pct';
 
     return null;
   }

@@ -17,13 +17,15 @@ import {
   Layers,
 } from 'lucide-react';
 import { Badge } from '../common/Badge';
-import { SENSOR_CONFIGS } from '@/lib/constants';
+import { SENSOR_CONFIGS, isExcludedMonitoringSensor, SENSOR_DISPLAY_ORDER } from '@/lib/constants';
 import { getSensorSeverity } from '@/lib/utils';
+import { isOpPpNode } from '@/hooks/useZoneFilter';
 
 interface GlobalZoneAveragesProps {
   readings: Record<string, Record<string, Record<string, ValidatedSensorReading>>>;
   nodeStatuses: Record<string, Record<string, NodeStatusState>>;
   activeZones: string[];
+  onlyOpPp?: boolean;
 }
 
 const SENSOR_ICONS: Record<string, React.ComponentType<{ className?: string }>> = {
@@ -64,6 +66,7 @@ export function GlobalZoneAverages({
   readings,
   nodeStatuses,
   activeZones,
+  onlyOpPp = false,
 }: GlobalZoneAveragesProps) {
   const [isOpen, setIsOpen] = useState(true);
 
@@ -73,9 +76,11 @@ export function GlobalZoneAverages({
       'tilt',
       'vibration',
       'displacement',
-      'gas',
-      'water',
       'crack',
+      'gas_ppm',
+      'water_level_cm',
+      'temperature',
+      'humidity',
     ];
 
     // Collect all known zones from either activeZones or readings
@@ -85,12 +90,17 @@ export function GlobalZoneAverages({
       .filter(Boolean)
       .sort();
 
-    // Collect all sensors present across all zones and nodes
+    // Collect all sensors present across all zones and nodes (respecting filter)
     const allSensorTypes = new Set<SensorType>(defaultSensorOrder);
     allKnownZones.forEach(zoneId => {
       const zoneNodes = readings[zoneId] || {};
-      Object.values(zoneNodes).forEach(nodeSensors => {
-        Object.keys(nodeSensors).forEach(st => allSensorTypes.add(st));
+      Object.entries(zoneNodes).forEach(([nodeId, nodeSensors]) => {
+        if (onlyOpPp && !isOpPpNode(nodeId)) return;
+        Object.keys(nodeSensors).forEach(st => {
+          if (!isExcludedMonitoringSensor(st)) {
+            allSensorTypes.add(st);
+          }
+        });
       });
     });
 
@@ -100,7 +110,10 @@ export function GlobalZoneAverages({
         ...Object.keys(readings[zoneId] || {}),
         ...Object.keys(nodeStatuses[zoneId] || {}),
       ]);
-      totalDiscoveredNodes += nodeKeys.size;
+      const validNodes = onlyOpPp
+        ? Array.from(nodeKeys).filter(isOpPpNode)
+        : Array.from(nodeKeys);
+      totalDiscoveredNodes += validNodes.length;
     });
 
     const results: GlobalSensorAverageMetric[] = Array.from(allSensorTypes).map(sensorType => {
@@ -115,6 +128,7 @@ export function GlobalZoneAverages({
       allKnownZones.forEach(zoneId => {
         const zoneNodes = readings[zoneId] || {};
         Object.entries(zoneNodes).forEach(([nodeId, sensorMap]) => {
+          if (onlyOpPp && !isOpPpNode(nodeId)) return;
           const r = sensorMap[sensorType];
           if (r && typeof r.value === 'number' && !isNaN(r.value)) {
             values.push(r.value);
@@ -162,7 +176,7 @@ export function GlobalZoneAverages({
       const min = Math.min(...values);
       const max = Math.max(...values);
 
-      if (sensorType === 'crack') {
+      if (sensorType === 'crack' && max <= 1) {
         const rupturedCount = values.filter(v => v >= 1).length;
         const isRuptured = rupturedCount > 0;
         return {
@@ -186,9 +200,19 @@ export function GlobalZoneAverages({
       }
 
       const severity = getSensorSeverity(sensorType, avg);
-      const maxThresh =
-        meta?.criticalThreshold || (meta?.warningThreshold ? meta.warningThreshold * 1.5 : 100);
-      const thresholdRatio = Math.min(1, Math.max(0, avg / (maxThresh || 1)));
+      let thresholdRatio = 0;
+      if (sensorType === 'displacement' || sensorType === 'distance') {
+        thresholdRatio = Math.max(0, Math.min(1, (30 - avg) / 20));
+      } else if (sensorType === 'gas' || sensorType === 'gas_ppm') {
+        thresholdRatio = avg <= 600 ? Math.max(0, Math.min(1, (600 - avg) / 400)) : 0;
+      } else if (sensorType === 'tilt' || sensorType === 'tilt_x_deg' || sensorType === 'tilt_y_deg') {
+        const maxThresh = meta?.criticalThreshold || 3.5;
+        thresholdRatio = Math.min(1, Math.max(0, Math.abs(avg) / (maxThresh || 1)));
+      } else {
+        const maxThresh =
+          meta?.criticalThreshold || (meta?.warningThreshold ? meta.warningThreshold * 1.5 : 100);
+        thresholdRatio = Math.min(1, Math.max(0, avg / (maxThresh || 1)));
+      }
 
       return {
         sensorType,
@@ -210,8 +234,24 @@ export function GlobalZoneAverages({
       };
     });
 
+    const filteredResults = results
+      .filter(r => !isExcludedMonitoringSensor(r.sensorType))
+      .filter((r, _, arr) => {
+        if (r.sensorType === 'temperature_c' && arr.some(x => x.sensorType === 'temperature')) return false;
+        if (r.sensorType === 'humidity_pct' && arr.some(x => x.sensorType === 'humidity')) return false;
+        if (r.sensorType === 'crack_displacement_mm' && arr.some(x => x.sensorType === 'crack')) return false;
+        return true;
+      })
+      .sort((a, b) => {
+        const orderA = SENSOR_DISPLAY_ORDER.indexOf(a.sensorType);
+        const orderB = SENSOR_DISPLAY_ORDER.indexOf(b.sensorType);
+        const idxA = orderA === -1 ? 999 : orderA;
+        const idxB = orderB === -1 ? 999 : orderB;
+        return idxA - idxB;
+      });
+
     return {
-      sensorMetrics: results,
+      sensorMetrics: filteredResults,
       totalZonesCount: allKnownZones.length,
       totalDiscoveredNodes,
     };
@@ -240,6 +280,11 @@ export function GlobalZoneAverages({
               <h2 className="font-black text-sm lg:text-base text-[#000000] dark:text-white tracking-wide">
                 All Active Zones — Mine-Wide Telemetry Averages
               </h2>
+              {onlyOpPp && (
+                <span className="inline-flex items-center gap-1 text-[10px] font-mono px-2 py-0.5 rounded-md bg-[#fca311]/20 text-amber-800 dark:text-[#fca311] border border-[#fca311]/40 font-bold">
+                  NODE_OP &amp; NODE_PP ONLY
+                </span>
+              )}
               <span className="inline-flex items-center gap-1.5 text-[10px] font-mono px-2.5 py-0.5 rounded-full bg-emerald-500/15 dark:bg-emerald-950/60 text-emerald-700 dark:text-emerald-400 border border-emerald-500/30">
                 <span className="relative flex h-2 w-2">
                   <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>

@@ -20,6 +20,57 @@ client.on('error', (err) => {
 client.on('connect', () => {
   console.log(`[Simulator] Successfully connected to Mosquitto Broker at ${brokerUrl}`);
   
+  // ─── Subscribe to Edge Alert Downlink Topics ───
+  const alertTopics = ['mine/+/+/alert', 'sensors/lora/downlink'];
+  client.subscribe(alertTopics, { qos: 1 }, (err) => {
+    if (!err) {
+      console.log('[Simulator] 📡 Subscribed to edge alert downlink topics');
+    }
+  });
+
+  // ─── Edge Alert Downlink Handler ───
+  client.on('message', (topic, payload) => {
+    if (topic.endsWith('/alert') || topic === 'sensors/lora/downlink') {
+      try {
+        const cmd = JSON.parse(payload.toString());
+        if (!cmd.level || !cmd.commandId) return;
+
+        const LED_ICONS = { red: '🔴', yellow: '🟡', blue: '🔵', green: '🟢' };
+        const BUZZER_ICONS = { siren: '🔊 CONTINUOUS SIREN', beep: '🔔 INTERMITTENT BEEP', chirp: '🔕 SINGLE CHIRP', off: '🔇 OFF' };
+        const led = LED_ICONS[cmd.color] || '⚪';
+        const buzzer = BUZZER_ICONS[cmd.buzzerMode] || '🔇 OFF';
+
+        console.log('');
+        console.log('╔══════════════════════════════════════════════════════════════╗');
+        console.log('║     ⚡ EDGE NODE HARDWARE SIMULATOR — LoRa DOWNLINK ⚡      ║');
+        console.log('╠══════════════════════════════════════════════════════════════╣');
+        console.log(`║  Node:    ${(cmd.nodeId || 'ALL').padEnd(14)} Zone: ${(cmd.zoneId || '-').padEnd(24)} ║`);
+        console.log(`║  Level:   ${cmd.level.padEnd(48)} ║`);
+        console.log(`║  LED:     ${led} ${(cmd.color?.toUpperCase() + ' ' + (cmd.ledPattern || '')).padEnd(46)} ║`);
+        console.log(`║  Buzzer:  ${buzzer.padEnd(48)} ║`);
+        console.log(`║  Message: ${(cmd.message || '').substring(0, 48).padEnd(48)} ║`);
+        console.log('╚══════════════════════════════════════════════════════════════╝');
+        console.log('');
+
+        // Send ACK back
+        if (cmd.nodeId && cmd.zoneId) {
+          const ackTopic = `mine/${cmd.zoneId}/${cmd.nodeId}/alert/ack`;
+          const ackPayload = JSON.stringify({
+            nodeId: cmd.nodeId,
+            zoneId: cmd.zoneId,
+            commandId: cmd.commandId,
+            acknowledged: true,
+            timestamp: new Date().toISOString(),
+          });
+          client.publish(ackTopic, ackPayload, { qos: 1 });
+          console.log(`  -> ACK sent on ${ackTopic}`);
+        }
+      } catch {
+        // Not an alert command, ignore
+      }
+    }
+  });
+
   const zoneId = 'ZONE_1';
   const nodeId = 'NODE_99';
   let currentSeq = 1;

@@ -25,6 +25,7 @@ import {
   FileText,
 } from 'lucide-react';
 import { ReportModal } from '@/components/common/ReportModal';
+import { SosEmergencyBanner } from '@/components/alerts/SosEmergencyBanner';
 import { buildAlertsReport, ExecutiveReportData } from '@/lib/reportGenerator';
 
 interface MlPredictionCardProps {
@@ -242,6 +243,8 @@ export default function AlertsPage() {
     lastSpokenMessage,
     stats,
     metrics,
+    edgeActuatorStates,
+    dispatchEdgeAlert,
   } = useRealtime();
   const [activeTab, setActiveTab] = useState<'all' | 'ml' | 'hardware'>('all');
   const [selectedMlPrediction, setSelectedMlPrediction] = useState<ShadowMlPrediction | null>(null);
@@ -400,6 +403,14 @@ export default function AlertsPage() {
           </div>
         </div>
       </div>
+
+      {/* SOS Emergency Anomaly Banner */}
+      <SosEmergencyBanner
+        alerts={alerts}
+        mlPredictions={mlPredictions}
+        edgeActuatorStates={edgeActuatorStates}
+        onDispatch={dispatchEdgeAlert}
+      />
 
       {/* Real-Time Live Voice Announcer Speech Indicator (Stable visual container, zero layout jump) */}
       {lastSpokenMessage && (

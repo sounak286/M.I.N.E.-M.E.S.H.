@@ -105,58 +105,37 @@ export const SosButtonGroup = React.memo(function SosButtonGroup({
     return (
       <div className="flex items-center gap-1.5">
         {/* Compact: Actuator status indicator */}
-        {actuatorState && (
-          <div className="flex items-center gap-1 mr-1">
+        {actuatorState ? (
+          <div className="flex items-center gap-2 px-2 py-1 rounded-md bg-[#f1f5f9] dark:bg-[#14213d]/50 border border-[#e2e8f0] dark:border-white/10">
             <span
               className={`w-2 h-2 rounded-full ${LED_COLORS[actuatorState.color] || 'bg-gray-400'} ${
                 actuatorState.level === 'CRITICAL' ? 'animate-ping' : actuatorState.level === 'WARNING' ? 'animate-pulse' : ''
               }`}
             />
+            <span className="text-[10px] font-mono font-bold uppercase tracking-wider text-[#14213d] dark:text-white/80">
+              {actuatorState.level}
+            </span>
             {actuatorState.buzzer ? (
-              <Volume2 className="w-2.5 h-2.5 text-red-500" />
+              <Volume2 className="w-3 h-3 text-red-500 ml-1" />
             ) : (
-              <VolumeX className="w-2.5 h-2.5 text-gray-400" />
+              <VolumeX className="w-3 h-3 text-gray-400 ml-1" />
             )}
           </div>
+        ) : (
+          <span className="text-[10px] font-mono text-[#5c677d] dark:text-[#94a3b8] px-1">AUTO MODE</span>
         )}
-
-        {LEVEL_ORDER.map((level) => {
-          const style = LEVEL_STYLES[level];
-          const Icon = style.icon;
-          const isActive = activeLevel === level;
-          const isDispatching = dispatching === level;
-
-          return (
-            <button
-              key={level}
-              onClick={() => handleClick(level)}
-              disabled={isDispatching}
-              title={`${EDGE_ALERT_CONFIGS[level].label}: ${EDGE_ALERT_CONFIGS[level].description}`}
-              className={`
-                relative p-1.5 rounded-lg transition-all duration-200 cursor-pointer
-                ${isActive ? `${style.activeBg} ${style.text} ring-2 ${style.ring} ${style.glow}` : `${style.bg} ${style.text} ${style.hoverBg} opacity-80 hover:opacity-100`}
-                ${isDispatching ? 'scale-90 opacity-60' : 'active:scale-90'}
-              `}
-            >
-              <Icon className="w-3 h-3" />
-              {isActive && (
-                <span className="absolute -top-0.5 -right-0.5 w-1.5 h-1.5 rounded-full bg-white animate-ping" />
-              )}
-            </button>
-          );
-        })}
       </div>
     );
   }
 
-  // Full-size SOS button group
+  // Full-size auto status display
   return (
     <div className="space-y-3">
       {/* Header */}
       <div className="flex items-center gap-2">
         <Radio className="w-4 h-4 text-[#fca311]" />
         <span className="text-xs font-bold font-mono text-[#14213d] dark:text-white tracking-wider uppercase">
-          SOS Edge Dispatch
+          Edge Anomaly Status
         </span>
         {actuatorState && (
           <div className="flex items-center gap-1.5 ml-auto">
@@ -170,47 +149,6 @@ export const SosButtonGroup = React.memo(function SosButtonGroup({
             </span>
           </div>
         )}
-      </div>
-
-      {/* Button Grid */}
-      <div className="grid grid-cols-4 gap-2">
-        {LEVEL_ORDER.map((level) => {
-          const style = LEVEL_STYLES[level];
-          const config = EDGE_ALERT_CONFIGS[level];
-          const Icon = style.icon;
-          const isActive = activeLevel === level;
-          const isDispatching = dispatching === level;
-
-          return (
-            <button
-              key={level}
-              onClick={() => handleClick(level)}
-              disabled={isDispatching}
-              title={config.description}
-              className={`
-                relative flex flex-col items-center gap-1.5 p-3 rounded-xl border transition-all duration-300 cursor-pointer
-                ${isActive
-                  ? `${style.activeBg} ${style.text} border-transparent ring-2 ${style.ring} ${style.glow}`
-                  : `${style.bg} ${style.text} ${style.hoverBg} border-transparent opacity-85 hover:opacity-100 hover:scale-105`
-                }
-                ${isDispatching ? 'scale-95 opacity-60' : 'active:scale-95'}
-              `}
-            >
-              <Icon className={compact ? 'w-4 h-4' : 'w-5 h-5'} />
-              <span className="text-[9px] font-mono font-black tracking-wide leading-tight text-center">
-                {level}
-              </span>
-              {isActive && (
-                <span className="absolute top-1 right-1 w-2 h-2 rounded-full bg-white animate-ping" />
-              )}
-              {isDispatching && (
-                <span className="absolute inset-0 flex items-center justify-center bg-black/20 rounded-xl">
-                  <span className="text-[10px] font-mono font-bold">Sending...</span>
-                </span>
-              )}
-            </button>
-          );
-        })}
       </div>
 
       {/* Buzzer Status */}

@@ -1,10 +1,9 @@
 /*
   ESP32 Multi-Sensor + LoRa (RA-02) + ESP-NOW Node
   ----------------------------------------
-  UPDATED: Removed all local threshold logic.
-  LED and Buzzer are strictly controlled via SOS downlinks from Gateway.
-  Supports 4-level Alerts (CRITICAL, WARNING, ADVISORY, NORMAL).
-  Actuates RGB LED (Color + Pattern) and Buzzer (Siren/Beep/Chirp/Off).
+  UPDATED: FreeRTOS Dual-Core Architecture.
+  - Core 1: Sensor Reading (blocking) & Alarms.
+  - Core 0: Real-time LoRa Rx/Tx (non-blocking).
 */
 
 #include <SPI.h>
@@ -18,7 +17,7 @@
 #include <ArduinoJson.h>
 
 // ---------------- Device Identity ----------------
-#define DEVICE_ID  "NODE_PP"
+#define DEVICE_ID  "NODE_OP"
 
 // ---------------- Pin Definitions ----------------
 // LoRa (RA-02 / SX1278)
@@ -76,13 +75,17 @@ typedef struct __attribute__((packed)) {
   uint8_t espnow_mac[6]; // 6 bytes
 } SensorData;          // Total = 60 bytes
 
+// ---------------- FreeRTOS Objects ----------------
+QueueHandle_t sensorQueue;
+SemaphoreHandle_t stateMutex;
+
 // ---------------- Objects ----------------
 DHT dht(DHT_PIN, DHT_TYPE);
 MPU9250_asukiaaa imu;
 
 // ---------------- Timing & State ----------------
 unsigned long lastSend = -6000; 
-const unsigned long SEND_INTERVAL = 1200; // ms (1.2 seconds)
+const unsigned long SEND_INTERVAL = 1000; // ms (1 seconds)
 uint32_t packetSent = 0;
 
 // ESP-NOW global states
@@ -90,10 +93,10 @@ uint8_t last_mac[6] = {0, 0, 0, 0, 0, 0};
 bool hasNewEspNowData = false;
 
 // ---------------- Alert State (Controlled by Dashboard) ----------------
-String alertLevel = "NORMAL";
-String alertColor = "green";
-String alertBuzzerMode = "off";
-String alertLedPattern = "solid";
+String alertLevel;
+String alertColor;
+String alertBuzzerMode;
+String alertLedPattern;
 
 // ==================================================
 void OnEspNowDataRecv(const esp_now_recv_info *esp_now_info, const uint8_t *data, int len) {
@@ -169,9 +172,100 @@ float readDistanceCM() {
 }
 
 // ==================================================
+// Core 0: LoRa Task (Real-Time Networking)
+// ==================================================
+void loraTaskCode(void * parameter) {
+  for(;;) {
+    // 1. Check for incoming packets (non-blocking)
+    int packetSize = LoRa.parsePacket();
+    if (packetSize) {
+      String incoming = "";
+      while (LoRa.available()) {
+        incoming += (char)LoRa.read();
+      }
+      
+      Serial.print("\n[LORA CORE] ---- Received LoRa Downlink ----\n");
+      Serial.print("[LORA CORE] Packet Size: "); Serial.print(packetSize); Serial.println(" bytes");
+      Serial.print("[LORA CORE] Payload Content: "); Serial.println(incoming);
+
+      StaticJsonDocument<1024> doc;
+      DeserializationError error = deserializeJson(doc, incoming);
+
+      if (error) {
+        Serial.print("[LORA CORE] JSON Parse Failed: ");
+        Serial.println(error.c_str());
+      } else {
+        String targetNode = doc["nodeId"] | "";
+        String targetType = doc["targetType"] | "node";
+
+        bool isForMe = false;
+        if (targetType == "node" && targetNode == String(DEVICE_ID)) isForMe = true;
+        if (targetNode == "ALL") isForMe = true;
+
+        if (isForMe) {
+          String level = doc["level"] | "NORMAL";
+          
+          // Protect String mutation with Mutex
+          xSemaphoreTake(stateMutex, portMAX_DELAY);
+          if (level == "NORMAL") {
+            alertLevel = "NORMAL";
+            alertColor = "green";
+            alertBuzzerMode = "off";
+            alertLedPattern = "solid";
+          } else {
+            alertLevel = level;
+            alertColor = doc["color"] | "red";
+            alertBuzzerMode = doc["buzzerMode"] | "siren";
+            alertLedPattern = doc["ledPattern"] | "strobe";
+          }
+          xSemaphoreGive(stateMutex);
+          
+          Serial.println(">>> SOS ALERT APPLIED FROM DASHBOARD <<<");
+
+          // Send ACK back via LoRa
+          String cmdId = doc["commandId"] | "";
+          if (cmdId != "") {
+            vTaskDelay(random(10, 50) / portTICK_PERIOD_MS); // Random backoff to avoid collision
+            StaticJsonDocument<200> ackDoc;
+            ackDoc["nodeId"] = String(DEVICE_ID);
+            ackDoc["commandId"] = cmdId;
+            ackDoc["type"] = "ack";
+            String ackPayload;
+            serializeJson(ackDoc, ackPayload);
+            
+            LoRa.beginPacket();
+            LoRa.print(ackPayload);
+            LoRa.endPacket();
+            Serial.println("[LORA CORE] ACK sent: " + ackPayload);
+          }
+        }
+      }
+    }
+
+    // 2. Check for outgoing packets in Queue (from Core 1)
+    SensorData txPayload;
+    if (xQueueReceive(sensorQueue, &txPayload, 0) == pdPASS) {
+      LoRa.beginPacket();
+      LoRa.write((const uint8_t *)&txPayload, sizeof(txPayload));
+      LoRa.endPacket();
+      Serial.printf("[LORA CORE] Transmitted Packet %d\n", txPayload.packetSeq);
+    }
+
+    // Yield to FreeRTOS watchdog
+    vTaskDelay(1 / portTICK_PERIOD_MS);
+  }
+}
+
+// ==================================================
 void setup() {
   Serial.begin(115200);
   while (!Serial) delay(10);
+
+  // Initialize strings here to prevent global C++ constructor crashes before boot
+  alertLevel = "NORMAL";
+  alertColor = "green";
+  alertBuzzerMode = "off";
+  alertLedPattern = "solid";
 
   pinMode(BUZZER_PIN, OUTPUT);
   digitalWrite(BUZZER_PIN, HIGH); 
@@ -195,114 +289,71 @@ void setup() {
   digitalWrite(BUZZER_PIN, LOW); delay(100); digitalWrite(BUZZER_PIN, HIGH);
   delay(100);
   digitalWrite(BUZZER_PIN, LOW); delay(100); digitalWrite(BUZZER_PIN, HIGH);
+
+  // Initialize FreeRTOS Objects
+  sensorQueue = xQueueCreate(5, sizeof(SensorData));
+  stateMutex = xSemaphoreCreateMutex();
+
+  // Pin LoRa Task to Core 0 (PRO_CPU)
+  xTaskCreatePinnedToCore(
+    loraTaskCode,   /* Task function. */
+    "LoRaTask",     /* name of task. */
+    10000,          /* Stack size of task */
+    NULL,           /* parameter of the task */
+    1,              /* priority of the task */
+    NULL,           /* Task handle to keep track of created task */
+    0);             /* pin task to core 0 */
+    
+  Serial.println("FreeRTOS LoRa Task started on Core 0.");
 }
 
+// ==================================================
+// Core 1: Sensor & Alarms Task (APP_CPU)
 // ==================================================
 void loop() {
   handleAlarms();
 
   if (millis() - lastSend >= SEND_INTERVAL) {
     lastSend = millis();
-    readAndSend();
-  }
-
-  // Process incoming LoRa SOS alerts
-  int packetSize = LoRa.parsePacket();
-  if (packetSize) {
-    String incoming = "";
-    while (LoRa.available()) {
-      incoming += (char)LoRa.read();
-    }
-    Serial.print("\n[NODE DEBUG] ---- Received LoRa Downlink ----\n");
-    Serial.print("[NODE DEBUG] Packet Size: "); Serial.print(packetSize); Serial.println(" bytes");
-    Serial.print("[NODE DEBUG] Payload String Length: "); Serial.print(incoming.length()); Serial.println(" characters");
-    Serial.print("[NODE DEBUG] Payload Content: "); Serial.println(incoming);
-
-    // Bumping JSON document size to 1024 to easily handle ~320 byte payloads without memory exhaustion
-    StaticJsonDocument<1024> doc;
-    DeserializationError error = deserializeJson(doc, incoming);
-
-    if (error) {
-      Serial.print("[NODE DEBUG] JSON Parse Failed: ");
-      Serial.println(error.c_str());
-    } else {
-      String targetNode = doc["nodeId"] | "";
-      String targetType = doc["targetType"] | "node";
-      
-      Serial.print("[NODE DEBUG] Parsed Target Node: "); Serial.println(targetNode);
-      Serial.print("[NODE DEBUG] Parsed Target Type: "); Serial.println(targetType);
-      Serial.print("[NODE DEBUG] My DEVICE_ID: "); Serial.println(DEVICE_ID);
-
-      bool isForMe = false;
-      if (targetType == "node" && targetNode == String(DEVICE_ID)) isForMe = true;
-      if (targetNode == "ALL") isForMe = true;
-      
-      Serial.print("[NODE DEBUG] Is this command for me? "); Serial.println(isForMe ? "YES" : "NO");
-
-      if (isForMe) {
-        String level = doc["level"] | "NORMAL";
-        if (level == "NORMAL") {
-          alertLevel = "NORMAL";
-          alertColor = "green";
-          alertBuzzerMode = "off";
-          alertLedPattern = "solid";
-        } else {
-          alertLevel = level;
-          alertColor = doc["color"] | "red";
-          alertBuzzerMode = doc["buzzerMode"] | "siren";
-          alertLedPattern = doc["ledPattern"] | "strobe";
-        }
-        Serial.println(">>> SOS ALERT APPLIED FROM DASHBOARD <<<");
-
-        // Send ACK back via LoRa
-        String cmdId = doc["commandId"] | "";
-        if (cmdId != "") {
-          delay(random(10, 50)); // Random backoff to avoid collision
-          StaticJsonDocument<200> ackDoc;
-          ackDoc["nodeId"] = String(DEVICE_ID);
-          ackDoc["commandId"] = cmdId;
-          ackDoc["type"] = "ack";
-          String ackPayload;
-          serializeJson(ackDoc, ackPayload);
-          
-          LoRa.beginPacket();
-          LoRa.print(ackPayload);
-          LoRa.endPacket();
-          Serial.println("ACK sent: " + ackPayload);
-        }
-      }
-    }
+    readAndQueue(); // Renamed from readAndSend
   }
 }
 
 // --- CORE ALARM LOGIC (ACTIVE-LOW) ---
-// Only uses state driven by the Dashboard commands
 void handleAlarms() {
   static String lastStateStr = "";
-  String currentStateStr = alertColor + "-" + alertLedPattern + "-" + alertBuzzerMode;
+  
+  // Safely read String states using Mutex
+  xSemaphoreTake(stateMutex, portMAX_DELAY);
+  String safeAlertColor = alertColor;
+  String safeAlertLedPattern = alertLedPattern;
+  String safeAlertBuzzerMode = alertBuzzerMode;
+  xSemaphoreGive(stateMutex);
+
+  String currentStateStr = safeAlertColor + "-" + safeAlertLedPattern + "-" + safeAlertBuzzerMode;
   
   if (currentStateStr != lastStateStr) {
     Serial.println("\n[NODE DEBUG] Actuator State Changed:");
-    Serial.println("[NODE DEBUG] Target Color: " + alertColor);
-    Serial.println("[NODE DEBUG] Target Pattern: " + alertLedPattern);
-    Serial.println("[NODE DEBUG] Buzzer Mode: " + alertBuzzerMode);
+    Serial.println("[NODE DEBUG] Target Color: " + safeAlertColor);
+    Serial.println("[NODE DEBUG] Target Pattern: " + safeAlertLedPattern);
+    Serial.println("[NODE DEBUG] Buzzer Mode: " + safeAlertBuzzerMode);
     lastStateStr = currentStateStr;
   }
 
   // 1. Determine Color
   int r = 0, g = 0, b = 0;
-  if (alertColor == "red") { r = 255; g = 0; b = 0; }
-  else if (alertColor == "yellow") { r = 255; g = 255; b = 0; }
-  else if (alertColor == "blue") { r = 0; g = 0; b = 255; }
-  else if (alertColor == "green") { r = 0; g = 255; b = 0; }
+  if (safeAlertColor == "red") { r = 255; g = 0; b = 0; }
+  else if (safeAlertColor == "yellow") { r = 255; g = 255; b = 0; }
+  else if (safeAlertColor == "blue") { r = 0; g = 0; b = 255; }
+  else if (safeAlertColor == "green") { r = 0; g = 255; b = 0; }
 
   // 2. LED Pattern
   unsigned long m = millis();
-  if (alertLedPattern == "strobe") {
+  if (safeAlertLedPattern == "strobe") {
     if (m % 200 < 100) setRGB(r, g, b); else setRGB(0, 0, 0);
-  } else if (alertLedPattern == "pulse") {
+  } else if (safeAlertLedPattern == "pulse") {
     if (m % 1000 < 500) setRGB(r, g, b); else setRGB(0, 0, 0);
-  } else if (alertLedPattern == "heartbeat") {
+  } else if (safeAlertLedPattern == "heartbeat") {
     int t = m % 1000;
     if (t < 100 || (t > 200 && t < 300)) setRGB(r, g, b); else setRGB(0, 0, 0);
   } else {
@@ -310,19 +361,19 @@ void handleAlarms() {
   }
 
   // 3. Buzzer Mode (Active Low: LOW = ON, HIGH = OFF)
-  if (alertBuzzerMode == "siren") {
+  if (safeAlertBuzzerMode == "siren") {
     digitalWrite(BUZZER_PIN, LOW); 
-  } else if (alertBuzzerMode == "beep") {
+  } else if (safeAlertBuzzerMode == "beep") {
     if (m % 1000 < 500) digitalWrite(BUZZER_PIN, LOW); else digitalWrite(BUZZER_PIN, HIGH);
-  } else if (alertBuzzerMode == "chirp") {
+  } else if (safeAlertBuzzerMode == "chirp") {
     if (m % 2000 < 100) digitalWrite(BUZZER_PIN, LOW); else digitalWrite(BUZZER_PIN, HIGH);
   } else {
     digitalWrite(BUZZER_PIN, HIGH);
   }
 }
 
-void readAndSend() {
-  float temp = dht.readTemperature();
+void readAndQueue() {
+  float temp = dht.readTemperature(); // This is BLOCKING, but LoRa Task is unaffected!
   float hum  = dht.readHumidity();
   bool dhtOk = !(isnan(temp) || isnan(hum));
   if (!dhtOk) { temp = 0; hum = 0; } 
@@ -367,9 +418,10 @@ void readAndSend() {
     memset(payload.espnow_mac, 0, 6); 
   }
 
-  LoRa.beginPacket();
-  LoRa.write((const uint8_t *)&payload, sizeof(payload));
-  LoRa.endPacket();
-
-  Serial.printf("Sent Packet %d | Temp: %.2f | Hum: %.2f\n", packetSent, temp, hum);
+  // Push to Queue for Core 0 to transmit
+  if (xQueueSend(sensorQueue, &payload, 0) == pdPASS) {
+    Serial.printf("[SENSOR CORE] Queued Packet %d | Temp: %.2f | Hum: %.2f\n", packetSent, temp, hum);
+  } else {
+    Serial.println("[SENSOR CORE] ERROR: LoRa Queue Full! Packet Dropped.");
+  }
 }

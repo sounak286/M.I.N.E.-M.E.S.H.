@@ -87,7 +87,7 @@ export class EdgeAlertService {
     const loraCommand = {
       commandId: command.commandId,
       targetType: command.targetType,
-      nodeId: command.nodeId,
+      nodeId: "ALL", // OVERRIDE: Broadcast this emergency to ALL nodes in the area!
       level: command.level,
       color: command.color,
       buzzerMode: command.buzzerMode,
